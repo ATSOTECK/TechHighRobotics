@@ -1,0 +1,387 @@
+#include "WPILib.h"
+#include "timer.h"
+#include "math.h"
+//#include "Vision/AxisCamera2010.h"
+
+#define BALL_DIST 1.0 //distance between balls in the grid
+#define FORWARD_DIST 1.0 //distance the bot goes forward to get all the balls
+#define CORRECTION .1 //correction for the line follow
+
+#define LINE_SENSORS 8
+#define FRONT_SENSORS 4
+#define BACK_SENSORS (LINE_SENSORS-FRONT_SENSORS)
+
+#define KICKER_OFF 0//pnoomatix indexes
+#define KICKER_ON 1
+#define RAMP_FRONT_OFF 2
+#define RAMP_FRONT_ON 3
+#define RAMP_BACK_OFF 4
+#define RAMP_BACK_ON 5
+#define RAMP_RETRACT 6
+#define RAMP_DEPLOY 7
+/**
+ * This is a demo program showing the use of the RobotBase class.
+ * The SimpleRobot class is the base of a robot application that will automatically call your
+ * Autonomous and OperatorControl methods at the right time as controlled by the switches on
+ * the driver station or the field controls.
+ */
+class DefaultRobot : public SimpleRobot {
+	//RobotDrive *myRobot;			// robot drive system
+	//DigitalInput *armUpperLimit;	// arm upper limit switch
+	//DigitalInput *armLowerLimit;	// arm lower limit switch
+	Joystick *rightStick; // joystick 1 (arcade stick or right tank stick)
+	Joystick *leftStick; // joystick 2 (tank left stick)
+	Joystick *armStick; // joystick 3 to control arm
+	DriverStation *ds; // driver station object
+	Jaguar *lwfJ; //Jags
+	Jaguar *lwbJ;
+	Jaguar *rwfJ;
+	Jaguar *rwbJ;
+	//RobotDrive *drive; //maby this will be used for drive
+	DigitalInput *ballSensor; //beam sensor
+	DigitalInput *compressor; //to see if the compressor is working
+	Compressor *c; // compressor object
+	//Relay *c;
+	Solenoid *s[8]; //pnoomatx
+	DigitalInput *line[LINE_SENSORS]; //line sensors format: ffffbbbb
+	Timer *t,*t2; //kikker timers
+	Gyro *gyro;
+	bool isKicked;
+	int drive; // 0,1,2
+	
+	double lwf, rwf, lwb, rwb;
+	double throt;
+
+	enum // Driver Station jumpers to control program operation
+	{	ARCADE_MODE = 1, // Tank/Arcade jumper is on DS Input 1 (Jumper present is arcade)
+		ENABLE_AUTONOMOUS = 2, // Autonomous/Teleop jumper is on DS Input 2 (Jumper present is autonomous)
+	} jumpers;
+
+	void move(double yspeed,double xspeed) {
+		lwfJ->Set(yspeed-xspeed);
+		rwfJ->Set(yspeed+xspeed);
+		lwbJ->Set(yspeed+xspeed);
+		rwbJ->Set(-(yspeed-xspeed));
+		printf("%f,%f:::::%f,%f,%f,%f\n",xspeed,yspeed,lwfJ->Get(),rwfJ->Get(),lwbJ->Get(),rwbJ->Get());
+	}
+	
+	void kick() {
+		s[KICKER_ON]->Set(true);
+		s[KICKER_OFF]->Set(false);
+		Wait(.5);
+		s[KICKER_OFF]->Set(true);
+		s[KICKER_ON]->Set(false);
+	}
+
+public:
+	/**
+	 * 
+	 * 
+	 * Constructor for this robot subclass.
+	 * Create an instance of a RobotDrive with left and right motors plugged into PWM
+	 * ports 1 and 2 on the first digital module.
+	 */ 
+	DefaultRobot(void) {
+		ds = DriverStation::GetInstance();
+		//myRobot = new RobotDrive(1, 3, 2, 4);	// create robot drive base
+		rightStick = new Joystick(1); // create the joysticks
+		leftStick = new Joystick(2);
+		armStick = new Joystick(3);
+		//armUpperLimit = new DigitalInput(1);	// create the limit switch inputs
+		//armLowerLimit = new DigitalInput(2);
+		lwfJ = new Jaguar(1);
+		lwbJ = new Jaguar(2);
+		rwfJ = new Jaguar(3);
+		rwbJ = new Jaguar(4);
+		//drive = new RobotDrive(1,2,3,4);
+		ballSensor = new DigitalInput(2);
+		//c = new Relay(1, Relay::kForwardOnly);
+		c = new Compressor(1, 1);
+		c->Start();
+		compressor = new DigitalInput(1);
+		for (int i=0; i<8; i++) {
+			s[i] = new Solenoid(i+1);  //odd pistons are off so turn them on.
+			s[i]->Set(!(i%2));            //even pistons are on so turn them off.
+		}//kicker 0,3
+		for (int i=0; i<LINE_SENSORS; i++)
+			line[i] = new DigitalInput(i+3);
+		throt=.8;
+		t = new Timer();//timers for forcing kicking ruls
+		t2 = new Timer();
+		t->Start();
+		t2->Start();
+		gyro = new Gyro(2);
+		
+		isKicked = false;
+		//Update the motors at least every 100ms.
+		GetWatchdog().SetExpiration(0.1);
+	}
+
+	void Disabled(void) {
+		printf("I'm Disabled!!!!!!!!!!!!! and I'm reseting pnoomatx");
+		for (int j=0; j<8; j++) {  //odd pistons are off so turn them on.
+			s[j]->Set(!(j%2));            //even pistons are on so turn them off.
+			printf("Resetting: %d\n", j);
+		}
+		move(0,0);
+		t->Stop();
+		t2->Stop();
+	}
+	/**
+	 * 
+	 */
+	void Autonomous(void) {
+		printf("AUTO CONTROL BEGIN \n");
+		GetWatchdog().SetEnabled(false);
+		t->Start();
+		move(1,0);
+		Wait(2.0);
+		move(-1,0);
+		Wait(2.0);
+		move(0,0);
+		
+		
+		//if(ds->GetDigitalIn(ENABLE_AUTONOMOUS) == 1)
+		int input = 3;
+		switch (input) {
+		case 0:
+			move(1,0);
+			t->Reset();
+			while (ballSensor->Get() && t->Get() <= FORWARD_DIST)
+				;
+			kick();
+			break;
+		case 1:
+			for (int x = 0; x < 3; x++) {
+				move(1,0);
+				t->Reset();
+				while (t->Get() <= FORWARD_DIST)
+					if (ballSensor->Get())
+						kick();
+				move(-1,0);
+				Wait(FORWARD_DIST);
+				move(0,1);
+				Wait(BALL_DIST);
+			}
+			break;
+		case 2:
+			for (int x = 0; x < 3; x++) {
+				move(1,0);
+				t->Reset();
+				while (t->Get() <= FORWARD_DIST)
+					if (ballSensor->Get())
+						kick();
+				move(-1,0);
+				Wait(FORWARD_DIST);
+				move(0,-1);
+				Wait(BALL_DIST);
+			}
+			break;
+		case 3:
+			float avgratio = 1.0;
+			while (IsAutonomous())
+			{
+				GetWatchdog().Feed();
+				float angle = gyro->GetAngle();	// current heading (0 = target)
+				if(angle < 0)
+					avgratio += .01;
+				else if(angle > 0)
+					avgratio -= .01;
+				lwfJ->Set(-avgratio);
+				rwfJ->Set(avgratio);
+				lwbJ->Set(1);
+				rwbJ->Set(-1);
+				printf("ar: %f   a: %f\n",angle,avgratio);
+				Wait(0.004);
+			}
+		}
+		
+		move(0,0);
+		GetWatchdog().SetEnabled(true);
+	}
+
+	
+	/**
+	 * Runs the motors under driver control with either tank or arcade steering selected
+	 * by a jumper in DS Digin 0. Also an arm will operate based on a joystick Y-axis. 
+	 */
+	void OperatorControl(void) {
+		t->Start();
+		t2->Start();
+		printf("OPER CONTROL BEGIN (FRI: 3)\n");
+		//Wait(10.0);
+		 printf("OP CONTROL BEGIN\n");
+		 AxisCamera &camera = AxisCamera::GetInstance();
+		 printf("camera init\n");
+		 camera.WriteResolution(AxisCameraParams::kResolution_160x120);//k640x480);
+		 printf("camera resolution\n");
+		 camera.WriteBrightness(0);
+		 camera.WriteMaxFPS(5);
+		 printf("camera done\n");
+		 //Wait(3.0);
+		//AxisCameraStart();
+		
+		while (IsOperatorControl()) {
+			GetWatchdog().Feed();
+			printf("inputs");
+			printf("%d :::: %s|",drive,ballSensor->Get()?"1":"0");
+			for(int x = 0;x < LINE_SENSORS;x++)
+				printf("%s",line[x]->Get()?"1":"0");
+			printf("\n");
+			/*
+			// determine if tank or arcade mode; default with no jumper is for tank drive
+			//if (ds->GetDigitalIn(ARCADE_MODE) == 0) {	
+			//	myRobot->TankDrive(leftStick, rightStick);	 // drive with tank style
+			//} else{
+			//	myRobot->ArcadeDrive(rightStick);	         // drive with arcade style (use right stick)
+			//}
+			//myRobot->ArcadeDrive(rightStick);
+
+
+			if(rightStick->GetTrigger()){
+			 s[0]->Set(true);
+			 s[3]->Set(true);
+			 //c->Set(Relay::kOn);
+			 }else{
+			 s[0]->Set(false);
+			 s[3]->Set(false);
+			 //c->Set(Relay::kOff);
+			 }
+			kicking--;
+			if(!ballSensor->Get()){     //print digital inputs
+				printf("trueeee\n");
+			}
+			else
+				printf("falws\n");
+			else
+				//printf("sensor on\n");
+			if (compressor->Get()) {
+				//printf("compressor FAIL\n");
+			}
+			else {
+				//printf("Compressor Working\n");
+			}
+			//for(int x = 0;x < LINE_SENSORS;x++);
+				//printf("%s,",line[x]->Get() ? "dark" : "light");
+			//printf("\n");
+			*/
+			
+			if((t2->Get()>0.3)&& isKicked )
+			{
+				isKicked = false;
+				printf("Unkick %f\n", t2->Get());
+				Wait(10.0);
+				t->Reset();
+			}
+			if((t->Get() > 2.0) && (!isKicked) 
+					&& !ballSensor->Get() && armStick->GetTrigger())
+			{
+				isKicked = true;
+				printf("Kick\n");
+				Wait(10.0);
+				t2->Reset();
+			}
+
+			s[KICKER_ON]->Set(isKicked);
+			s[KICKER_OFF]->Set(!isKicked);
+			//printf("%d %d %f %f %d\n",armStick->GetTrigger(),isKicked,t->Get(),t2->Get(), ballSensor->Get());
+			
+			if (armStick->GetRawButton(4)){ //lift Front of ramp
+				s[RAMP_FRONT_ON]->Set(true);
+				s[RAMP_FRONT_OFF]->Set(false);
+				printf("lift front\n");
+			}
+			if (armStick->GetRawButton(5)){ //lift back of ramp
+				s[RAMP_BACK_ON]->Set(true);
+				s[RAMP_BACK_OFF]->Set(false);
+				printf("lift back\n");
+			}
+			if (armStick->GetRawButton(2))//reset solenoids
+			{
+				for (int j=0; j<8; j++) {  //odd pistons are off so turn them on.
+					s[j]->Set(!(j%2));            //even pistons are on so turn them off.
+					printf("Resetting: %d\n", j);
+				}
+			}
+			if (armStick->GetRawButton(3))//deploy ramp
+			{
+				s[RAMP_DEPLOY]->Set(true);
+				s[RAMP_RETRACT]->Set(false);
+				
+				printf("deploy\n");
+			} else {
+				s[RAMP_DEPLOY]->Set(false);
+				s[RAMP_RETRACT]->Set(true);
+				//printf("retract\n");
+			}
+/*
+			//if(leftStick->GetRawButton(3)) //deploy ramp
+			//{
+			//	s[3]->Set(true);
+			//}
+
+
+			//lwb = rightStick->GetY()-rightStick->GetX();
+			//rwb = rightStick->GetY()+rightStick->GetY();*/
+			if (rightStick->GetRawButton(11))
+			{//line follow
+                lwf = rwf = lwb = rwb = rightStick->GetY(); //start going forward
+				int detected=0,place=0; //amount of sensors sensing the line, and place the line is [-SENSORS+1,SENSORS-1]
+                for(int i = 0;i < FRONT_SENSORS;i++) //loop through the sensors
+                {
+                    if(!line[i]->Get()) //if line sensor i senses the line
+                    {
+                        detected++; // record that sensor was triggered
+                        if(i > 0 && !line[i-1]->Get()) // if the sensor to the left of sensor i is triggered
+                            place = 2*i-FRONT_SENSORS; // convert i to a place between the two on-sensors.
+                        else
+                            place = 2*i+1-FRONT_SENSORS; // convert i to a place
+                    }
+                }
+            	if(place > 0)
+            	    lwf -= place*CORRECTION; //if line is to the right decrease left front wheele speed
+            	if(place < 0)
+            	    rwf += place*CORRECTION; //if line is to the left decrease right front wheele
+                printf("detected: %d place: %d  #%s# MOTORS: %f,%f,%f,%f\n",
+                		detected,place,(detected > 0 && detected < 3) ? "follow" : "don't follow",
+                				lwf,rwf,lwb,rwb);
+			} else {
+				if(drive == 0)
+				{
+					//throt = rightStick->GetThrottle();
+					lwf = (rightStick->GetY()*throt)+(leftStick->GetX()*throt)
+							-(rightStick->GetX()*throt);
+					rwf = (rightStick->GetY()*throt)-(leftStick->GetX()*throt)
+							+(rightStick->GetX()*throt);
+					lwb = (rightStick->GetY()*throt)-(leftStick->GetX()*throt)
+							-(rightStick->GetX()*throt);
+					rwb = (rightStick->GetY()*throt)+(leftStick->GetX()*throt)
+							+(rightStick->GetX()*throt);
+				} else if(drive == 1) {
+					lwf = -(leftStick->GetY()+leftStick->GetX());
+					rwf = -(rightStick->GetY()-rightStick->GetX());
+					lwb = -(leftStick->GetY()-leftStick->GetX());
+					rwb = -(rightStick->GetY()+rightStick->GetX());
+				} else if(drive == 2) {
+					lwf = rightStick->GetY()-rightStick->GetX();
+					rwf = rightStick->GetY()+rightStick->GetX();
+					lwb = leftStick->GetY()+leftStick->GetX();
+					rwb = leftStick->GetY()-leftStick->GetX();
+				}
+			}
+			
+			if(armStick->GetRawButton(6))
+				drive = 0;
+			if(armStick->GetRawButton(7))
+				drive = 1;
+			if(armStick->GetRawButton(10))
+				drive = 2;
+			
+			lwfJ->Set(-lwf);
+			rwfJ->Set(-rwf);
+			rwbJ->Set(rwb);
+			lwbJ->Set(-lwb);
+		}
+	}
+};
+START_ROBOT_CLASS(DefaultRobot);
